@@ -3,6 +3,7 @@ import importBrunoCollection from 'utils/importers/bruno-collection';
 import importPostmanCollection from 'utils/importers/postman-collection';
 import importInsomniaCollection from 'utils/importers/insomnia-collection';
 import importOpenapiCollection from 'utils/importers/openapi-collection';
+import importRamlCollection from 'utils/importers/raml-collection';
 import { toastError } from 'utils/common/error';
 import Modal from 'components/Modal';
 
@@ -39,6 +40,14 @@ const ImportCollection = ({ onClose, handleSubmit }) => {
       .catch((err) => toastError(err, 'OpenAPI v3 Import collection failed'));
   };
 
+  const handleImportRamlCollection = () => {
+    importRamlCollection()
+      .then((collection) => {
+        handleSubmit(collection);
+      })
+      .catch((err) => toastError(err, 'RAML v1 Import collection failed'));
+  };
+
   return (
     <Modal size="sm" title="Import Collection" hideFooter={true} handleConfirm={onClose} handleCancel={onClose}>
       <div>
@@ -53,6 +62,9 @@ const ImportCollection = ({ onClose, handleSubmit }) => {
         </div>
         <div className="text-link hover:underline cursor-pointer mt-2" onClick={handleImportOpenapiCollection}>
           OpenAPI V3 Spec
+        </div>
+        <div className="text-link hover:underline cursor-pointer mt-2" onClick={handleImportRamlCollection}>
+          Raml V1.0 Spec
         </div>
       </div>
     </Modal>
