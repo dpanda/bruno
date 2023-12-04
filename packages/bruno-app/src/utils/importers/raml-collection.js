@@ -1,5 +1,4 @@
 import jsyaml from 'js-yaml';
-import each from 'lodash/each';
 import get from 'lodash/get';
 import fileDialog from 'file-dialog';
 import { uuid } from 'utils/common';
@@ -54,22 +53,7 @@ const buildApiName = (method, path) => {
   return method.toUpperCase() + ' ' + path.replaceAll('/', ' ').replaceAll('{', ' ').replaceAll('}', ' ').trim();
 };
 
-const buildEmptyJsonBody = (bodySchema) => {
-  let _jsonBody = {};
-  each(bodySchema.properties || {}, (prop, name) => {
-    if (prop.type === 'object') {
-      _jsonBody[name] = buildEmptyJsonBody(prop);
-      // handle arrays
-    } else if (prop.type === 'array') {
-      _jsonBody[name] = [];
-    } else {
-      _jsonBody[name] = '';
-    }
-  });
-  return _jsonBody;
-};
-
-const createBrunoRequest = (method, baseUri, path, properties) => {
+const createBrunoRequest = (method, baseUri, path, properties, defaultMediaType) => {
   console.log(method + ' ' + path);
   const brunoRequestItem = {
     uid: uuid(),
@@ -123,6 +107,44 @@ const createBrunoRequest = (method, baseUri, path, properties) => {
     })
   );
 
+  if (properties.body) {
+    let bodyModeMapping = {
+      'multipart/form-data': 'multipartForm',
+      'application/x-www-form-urlencoded': 'formUrlEncoded',
+      'application/json': 'json',
+      'application/xml': 'xml',
+      'text/xml': 'xml',
+      'text/plain': 'text'
+    };
+
+    var mediaType = Object.keys(bodyModeMapping).find((element) => properties.body[element]) || defaultMediaType;
+
+    console.log('Media type ' + mediaType);
+
+    if (mediaType) {
+      let bodyMode = bodyModeMapping[mediaType];
+      brunoRequestItem.request.body.mode = bodyMode;
+      console.log('Body mode is ' + bodyMode);
+
+      if (bodyMode === 'multipartForm' || bodyMode === 'formUrlEncoded') {
+        let bodyProps = get(properties, 'body.mediaType.properties', properties.body.properties) || {};
+
+        Object.entries(bodyProps).map(([field, fieldProp]) =>
+          brunoRequestItem.request.body[bodyMode].push({
+            uid: uuid(),
+            name: field,
+            value: '',
+            description: fieldProp.description || '',
+            enabled: fieldProp.required
+          })
+        );
+      } else {
+        let example = get(properties, 'body.mediaType.example', properties.body.example) || '';
+
+        brunoRequestItem.request.body[bodyMode] = example;
+      }
+    }
+  }
   return brunoRequestItem;
 };
 
@@ -135,7 +157,7 @@ const createBrunoFolder = (path) => {
   };
 };
 
-const transformRamlNode = (entries, baseUri, basePath, currentFolder) => {
+const transformRamlNode = (entries, baseUri, basePath, defaultMediaType, currentFolder) => {
   const reserved = [
     'title',
     'protocols',
@@ -149,16 +171,15 @@ const transformRamlNode = (entries, baseUri, basePath, currentFolder) => {
   ];
   const methods = ['get', 'patch', 'post', 'delete', 'put', 'options', 'head', 'trace'];
 
-  // TODO support headers specified not at api level but in parent node (cannot filter out reserved keywords)
+  // TODO support headers specified not at api level but in parent node
 
   let brunoEntries = Object.entries(entries)
-    //.filter(([key, val]) => !reserved.includes(key.toLowerCase()))
     .map(([key, val]) => {
       if (methods.includes(key.toLowerCase())) {
-        return createBrunoRequest(key, baseUri, basePath, val || {});
+        return createBrunoRequest(key, baseUri, basePath, val || {}, defaultMediaType);
       } else if (key.startsWith('/')) {
         let folder = createBrunoFolder(key);
-        return transformRamlNode(val, baseUri, basePath + ensureUriParameter(key), folder);
+        return transformRamlNode(val, baseUri, basePath + ensureUriParameter(key), defaultMediaType, folder);
       }
       return [];
     })
@@ -172,325 +193,24 @@ const transformRamlNode = (entries, baseUri, basePath, currentFolder) => {
   }
 };
 
-const transformOpenapiRequestItem = (request) => {
-  let _operationObject = request.operationObject;
-
-  let operationName = _operationObject.operationId || _operationObject.summary || _operationObject.description;
-  if (!operationName) {
-    operationName = `${request.method} ${request.path}`;
-  }
-
-  const brunoRequestItem = {
-    uid: uuid(),
-    name: operationName,
-    type: 'http-request',
-    request: {
-      url: ensureUrl(request.global.server + '/' + request.path),
-      method: request.method.toUpperCase(),
-      auth: {
-        mode: 'none',
-        basic: null,
-        bearer: null,
-        digest: null
-      },
-      headers: [],
-      params: [],
-      body: {
-        mode: 'none',
-        json: null,
-        text: null,
-        xml: null,
-        formUrlEncoded: [],
-        multipartForm: []
-      }
-    }
-  };
-
-  each(_operationObject.parameters || [], (param) => {
-    if (param.in === 'query') {
-      brunoRequestItem.request.params.push({
-        uid: uuid(),
-        name: param.name,
-        value: '',
-        description: param.description || '',
-        enabled: param.required
-      });
-    } else if (param.in === 'header') {
-      brunoRequestItem.request.headers.push({
-        uid: uuid(),
-        name: param.name,
-        value: '',
-        description: param.description || '',
-        enabled: param.required
-      });
-    }
-  });
-
-  let auth;
-  // allow operation override
-  if (_operationObject.security && _operationObject.security.length > 0) {
-    let schemeName = Object.keys(_operationObject.security[0])[0];
-    auth = request.global.security.getScheme(schemeName);
-  } else if (request.global.security.supported.length > 0) {
-    auth = request.global.security.supported[0];
-  }
-
-  if (auth) {
-    if (auth.type === 'http' && auth.scheme === 'basic') {
-      brunoRequestItem.request.auth.mode = 'basic';
-      brunoRequestItem.request.auth.basic = {
-        username: '{{username}}',
-        password: '{{password}}'
-      };
-    } else if (auth.type === 'http' && auth.scheme === 'bearer') {
-      brunoRequestItem.request.auth.mode = 'bearer';
-      brunoRequestItem.request.auth.bearer = {
-        token: '{{token}}'
-      };
-    } else if (auth.type === 'apiKey' && auth.in === 'header') {
-      brunoRequestItem.request.headers.push({
-        uid: uuid(),
-        name: auth.name,
-        value: '{{apiKey}}',
-        description: 'Authentication header',
-        enabled: true
-      });
-    }
-  }
-
-  // TODO: handle allOf/anyOf/oneOf
-  if (_operationObject.requestBody) {
-    let content = get(_operationObject, 'requestBody.content', {});
-    let mimeType = Object.keys(content)[0];
-    let body = content[mimeType] || {};
-    let bodySchema = body.schema;
-    if (mimeType === 'application/json') {
-      brunoRequestItem.request.body.mode = 'json';
-      if (bodySchema && bodySchema.type === 'object') {
-        let _jsonBody = buildEmptyJsonBody(bodySchema);
-        brunoRequestItem.request.body.json = JSON.stringify(_jsonBody, null, 2);
-      }
-    } else if (mimeType === 'application/x-www-form-urlencoded') {
-      brunoRequestItem.request.body.mode = 'formUrlEncoded';
-      if (bodySchema && bodySchema.type === 'object') {
-        each(bodySchema.properties || {}, (prop, name) => {
-          brunoRequestItem.request.body.formUrlEncoded.push({
-            uid: uuid(),
-            name: name,
-            value: '',
-            description: prop.description || '',
-            enabled: true
-          });
-        });
-      }
-    } else if (mimeType === 'multipart/form-data') {
-      brunoRequestItem.request.body.mode = 'multipartForm';
-      if (bodySchema && bodySchema.type === 'object') {
-        each(bodySchema.properties || {}, (prop, name) => {
-          brunoRequestItem.request.body.multipartForm.push({
-            uid: uuid(),
-            name: name,
-            value: '',
-            description: prop.description || '',
-            enabled: true
-          });
-        });
-      }
-    } else if (mimeType === 'text/plain') {
-      brunoRequestItem.request.body.mode = 'text';
-      brunoRequestItem.request.body.text = '';
-    } else if (mimeType === 'text/xml') {
-      brunoRequestItem.request.body.mode = 'xml';
-      brunoRequestItem.request.body.xml = '';
-    }
-  }
-
-  return brunoRequestItem;
-};
-
-const resolveRefs = (spec, components = spec.components) => {
-  if (!spec || typeof spec !== 'object') {
-    return spec;
-  }
-
-  if (Array.isArray(spec)) {
-    return spec.map((item) => resolveRefs(item, components));
-  }
-
-  if ('$ref' in spec) {
-    const refPath = spec.$ref;
-
-    if (refPath.startsWith('#/components/')) {
-      // Local reference within components
-      const refKeys = refPath.replace('#/components/', '').split('/');
-      let ref = components;
-
-      for (const key of refKeys) {
-        if (ref[key]) {
-          ref = ref[key];
-        } else {
-          // Handle invalid references gracefully?
-          return spec;
-        }
-      }
-
-      return resolveRefs(ref, components);
-    } else {
-      // Handle external references (not implemented here)
-      // You would need to fetch the external reference and resolve it.
-      // Example: Fetch and resolve an external reference from a URL.
-    }
-  }
-
-  // Recursively resolve references in nested objects
-  for (const prop in spec) {
-    spec[prop] = resolveRefs(spec[prop], components);
-  }
-
-  return spec;
-};
-
-const groupRequestsByTags = (requests) => {
-  let _groups = {};
-  let ungrouped = [];
-  each(requests, (request) => {
-    let tags = request.operationObject.tags || [];
-    if (tags.length > 0) {
-      let tag = tags[0]; // take first tag
-      if (!_groups[tag]) {
-        _groups[tag] = [];
-      }
-      _groups[tag].push(request);
-    } else {
-      ungrouped.push(request);
-    }
-  });
-
-  let groups = Object.keys(_groups).map((groupName) => {
-    return {
-      name: groupName,
-      requests: _groups[groupName]
-    };
-  });
-
-  return [groups, ungrouped];
-};
-
-const getDefaultUrl = (serverObject) => {
-  let url = serverObject.url;
-  if (serverObject.variables) {
-    each(serverObject.variables, (variable, variableName) => {
-      let sub = variable.default || (variable.enum ? variable.enum[0] : `{{${variableName}}}`);
-      url = url.replace(`{${variableName}}`, sub);
-    });
-  }
-  return url;
-};
-
-const getSecurity = (apiSpec) => {
-  let supportedSchemes = apiSpec.security || [];
-  if (supportedSchemes.length === 0) {
-    return {
-      supported: []
-    };
-  }
-
-  let securitySchemes = get(apiSpec, 'components.securitySchemes', {});
-  if (Object.keys(securitySchemes) === 0) {
-    return {
-      supported: []
-    };
-  }
-
-  return {
-    supported: supportedSchemes.map((scheme) => {
-      var schemeName = Object.keys(scheme)[0];
-      return securitySchemes[schemeName];
-    }),
-    schemes: securitySchemes,
-    getScheme: (schemeName) => {
-      return securitySchemes[schemeName];
-    }
-  };
-};
-
 const parseRamlCollection = (data) => {
   return new Promise((resolve, reject) => {
     try {
       console.log(data);
 
       let baseUri = data['baseUri'] || '{{baseUri}}';
+      let defaultMediaType = data['mediaType'];
+
+      console.log('default media type is ' + defaultMediaType);
 
       const brunoCollection = {
         name: data.title || '',
         uid: uuid(),
         version: '1',
-        items: transformRamlNode(data, baseUri, ''),
+        items: transformRamlNode(data, baseUri, '', defaultMediaType),
         environments: []
       };
       resolve(brunoCollection);
-
-      /*
-      const collectionData = resolveRefs(data);
-      if (!collectionData) {
-        reject(new BrunoError('Invalid Raml collection. Failed to resolve refs.'));
-        return;
-      }
-
-      // Currently parsing of openapi spec is "do your best", that is
-      // allows "invalid" openapi spec
-
-      // assumes v3 if not defined. v2 no supported yet
-      if (collectionData.openapi && !collectionData.openapi.startsWith('3')) {
-        reject(new BrunoError('Only OpenAPI v3 is supported currently.'));
-        return;
-      }
-
-      // TODO what if info.title not defined?
-      brunoCollection.name = collectionData.info.title;
-      let servers = collectionData.servers || [];
-      let baseUrl = servers[0] ? getDefaultUrl(servers[0]) : '';
-      let securityConfig = getSecurity(collectionData);
-
-      let allRequests = Object.entries(collectionData.paths)
-        .map(([path, methods]) => {
-          return Object.entries(methods)
-            .filter(([method, op]) => {
-              return ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'].includes(
-                method.toLowerCase()
-              );
-            })
-            .map(([method, operationObject]) => {
-              return {
-                method: method,
-                path: path,
-                operationObject: operationObject,
-                global: {
-                  server: baseUrl,
-                  security: securityConfig
-                }
-              };
-            });
-        })
-        .reduce((acc, val) => acc.concat(val), []); // flatten
-
-      let [groups, ungroupedRequests] = groupRequestsByTags(allRequests);
-      let brunoFolders = groups.map((group) => {
-        return {
-          uid: uuid(),
-          name: group.name,
-          type: 'folder',
-          items: group.requests.map(transformOpenapiRequestItem)
-        };
-      });
-
-      let ungroupedItems = ungroupedRequests.map(transformOpenapiRequestItem);
-      let brunoCollectionItems = brunoFolders.concat(ungroupedItems);
-      brunoCollection.items = brunoCollectionItems;
-      resolve(brunoCollection);
-      */
-      //console.log(brunoCollection);
-      //throw new Error('Not implemented');
     } catch (err) {
       console.error(err);
       reject(new BrunoError('An error occurred while parsing the RAML collection'));
